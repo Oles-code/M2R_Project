@@ -137,7 +137,6 @@ Notebook for interactive prototyping. Six cells:
 4. Import `lingam`
 5. Toy `DirectLiNGAM` run on the first 100 cells × top-10 highest-variance
    genes — a smoke test of the model on the pipeline output
-6. Empty scratch cell
 
 ---
 
