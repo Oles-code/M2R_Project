@@ -18,9 +18,11 @@ DATA_DIR   = "./causalbench_data"   # where the benchmark caches downloaded + pr
 OUTPUT_DIR = "./causalbench_plots"  # where plots are saved
 
 DATASET    = "weissmann_k562"       # "weissmann_k562" | "weissmann_rpe1"
-REGIME     = "observational"        # "observational" | "partial_interventional" | "full_interventional"
+REGIME     = "full_interventional"  # "observational" | "partial_interventional" | "full_interventional"
 SUBSET     = 1.0                    # fraction of training data to load (0.0–1.0); use < 1.0 to iterate faster
 PARTIAL_FRACTION = 0.5              # only used when REGIME == "partial_interventional"
+# Note: "observational" returns control cells only, so sections 4/5b/6/8
+# (which compare perturbed vs. control) degenerate to no-ops.
 
 
 # ── 1. Imports ──────────────────────────────────────────────────────────────
@@ -126,13 +128,18 @@ ax.tick_params(axis="y", labelsize=7)
 # 5b. Distribution of cells-per-intervention (excluding control)
 ax = axes[0, 1]
 per_gene_counts = [v for k, v in intervention_counts.items() if k != "non-targeting"]
-ax.hist(per_gene_counts, bins=40, color="#2ecc71", edgecolor="white")
-ax.set_xlabel("Cells per perturbed gene")
-ax.set_ylabel("Number of genes")
-ax.set_title("Distribution of cells per perturbed gene\n(control excluded)")
-ax.axvline(np.median(per_gene_counts), color="black", linestyle="--",
-           label=f"Median = {int(np.median(per_gene_counts))}")
-ax.legend()
+if per_gene_counts:
+    ax.hist(per_gene_counts, bins=40, color="#2ecc71", edgecolor="white")
+    ax.set_xlabel("Cells per perturbed gene")
+    ax.set_ylabel("Number of genes")
+    ax.set_title("Distribution of cells per perturbed gene\n(control excluded)")
+    ax.axvline(np.median(per_gene_counts), color="black", linestyle="--",
+               label=f"Median = {int(np.median(per_gene_counts))}")
+    ax.legend()
+else:
+    ax.text(0.5, 0.5, f"No perturbed cells in regime\n{REGIME!r}",
+            ha="center", va="center", transform=ax.transAxes)
+    ax.set_axis_off()
 
 
 # 5c. Per-gene mean expression (log scale)
@@ -165,40 +172,43 @@ print("\n── 6. Control vs perturbed expression ──")
 ctrl_mask = np.array([x == "non-targeting" for x in interventions])
 pert_mask = ~ctrl_mask
 
-ctrl_mean = expression_matrix[ctrl_mask].mean(axis=0)   # shape (n_genes,)
-pert_mean = expression_matrix[pert_mask].mean(axis=0)
+if not pert_mask.any() or not ctrl_mask.any():
+    print(f"  skipped — regime {REGIME!r} has no perturbed and/or no control cells")
+else:
+    ctrl_mean = expression_matrix[ctrl_mask].mean(axis=0)   # shape (n_genes,)
+    pert_mean = expression_matrix[pert_mask].mean(axis=0)
 
-log2fc = np.log2((pert_mean + 1e-6) / (ctrl_mean + 1e-6))
+    log2fc = np.log2((pert_mean + 1e-6) / (ctrl_mean + 1e-6))
 
-top_up   = np.argsort(log2fc)[-10:][::-1]
-top_down = np.argsort(log2fc)[:10]
+    top_up   = np.argsort(log2fc)[-10:][::-1]
+    top_down = np.argsort(log2fc)[:10]
 
-print("\nTop 10 genes UP in perturbed vs control:")
-for i in top_up:
-    print(f"  {gene_names[i]:<20}  log2FC = {log2fc[i]:+.3f}")
+    print("\nTop 10 genes UP in perturbed vs control:")
+    for i in top_up:
+        print(f"  {gene_names[i]:<20}  log2FC = {log2fc[i]:+.3f}")
 
-print("\nTop 10 genes DOWN in perturbed vs control:")
-for i in top_down:
-    print(f"  {gene_names[i]:<20}  log2FC = {log2fc[i]:+.3f}")
+    print("\nTop 10 genes DOWN in perturbed vs control:")
+    for i in top_down:
+        print(f"  {gene_names[i]:<20}  log2FC = {log2fc[i]:+.3f}")
 
-fig, ax = plt.subplots(figsize=(7, 5))
-ax.scatter(np.log1p(ctrl_mean), log2fc, s=3, alpha=0.4, color="#3498db")
-threshold = 0.5
-ax.axhline( threshold, color="red",  linestyle="--", linewidth=0.8)
-ax.axhline(-threshold, color="red",  linestyle="--", linewidth=0.8)
-ax.axhline(0,          color="black", linestyle="-",  linewidth=0.5)
-# Annotate top movers
-for i in list(top_up[:5]) + list(top_down[:5]):
-    ax.annotate(gene_names[i], (np.log1p(ctrl_mean[i]), log2fc[i]),
-                fontsize=6, color="darkred", ha="center")
-ax.set_xlabel("log(1 + mean expression in control)")
-ax.set_ylabel("log2 fold-change  (perturbed / control)")
-ax.set_title("MA-style plot: perturbed vs control")
-plt.tight_layout()
-save_path = os.path.join(OUTPUT_DIR, f"{DATASET}_{REGIME}_MA_plot.png")
-plt.savefig(save_path, dpi=150)
-print(f"\n  Saved MA plot → {save_path}")
-plt.show()
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.scatter(np.log1p(ctrl_mean), log2fc, s=3, alpha=0.4, color="#3498db")
+    threshold = 0.5
+    ax.axhline( threshold, color="red",  linestyle="--", linewidth=0.8)
+    ax.axhline(-threshold, color="red",  linestyle="--", linewidth=0.8)
+    ax.axhline(0,          color="black", linestyle="-",  linewidth=0.5)
+    # Annotate top movers
+    for i in list(top_up[:5]) + list(top_down[:5]):
+        ax.annotate(gene_names[i], (np.log1p(ctrl_mean[i]), log2fc[i]),
+                    fontsize=6, color="darkred", ha="center")
+    ax.set_xlabel("log(1 + mean expression in control)")
+    ax.set_ylabel("log2 fold-change  (perturbed / control)")
+    ax.set_title("MA-style plot: perturbed vs control")
+    plt.tight_layout()
+    save_path = os.path.join(OUTPUT_DIR, f"{DATASET}_{REGIME}_MA_plot.png")
+    plt.savefig(save_path, dpi=150)
+    print(f"\n  Saved MA plot → {save_path}")
+    plt.show()
 
 
 # ── 7. Correlation heatmap of a random subset of genes ───────────────────────
@@ -232,23 +242,26 @@ plt.show()
 # ── 8. Quick peek at a specific perturbation ─────────────────────────────────
 # Pick the most-common real perturbation (skip "non-targeting" and "excluded").
 FOCUS_GENE = next(
-    name for name, _ in top20
-    if name not in ("non-targeting", "excluded")
+    (name for name, _ in top20 if name not in ("non-targeting", "excluded")),
+    None,
 )
 
 print(f"\n── 8. Spotlight on perturbation: {FOCUS_GENE} ──")
-focus_mask = np.array([x == FOCUS_GENE for x in interventions])
-focus_expr = expression_matrix[focus_mask]
-ctrl_expr  = expression_matrix[ctrl_mask]
+if FOCUS_GENE is None or not ctrl_mask.any():
+    print(f"  skipped — regime {REGIME!r} has no real perturbations to spotlight")
+else:
+    focus_mask = np.array([x == FOCUS_GENE for x in interventions])
+    focus_expr = expression_matrix[focus_mask]
+    ctrl_expr  = expression_matrix[ctrl_mask]
 
-# Find the 10 genes most differentially expressed under this perturbation
-diff = focus_expr.mean(axis=0) - ctrl_expr.mean(axis=0)
-top_diff_idx = np.argsort(np.abs(diff))[-10:][::-1]
+    # Find the 10 genes most differentially expressed under this perturbation
+    diff = focus_expr.mean(axis=0) - ctrl_expr.mean(axis=0)
+    top_diff_idx = np.argsort(np.abs(diff))[-10:][::-1]
 
-print(f"Cells with {FOCUS_GENE} knocked out: {focus_mask.sum()}")
-print(f"\nTop 10 most affected genes:")
-for i in top_diff_idx:
-    print(f"  {gene_names[i]:<20}  mean_diff = {diff[i]:+.4f}")
+    print(f"Cells with {FOCUS_GENE} knocked out: {focus_mask.sum()}")
+    print(f"\nTop 10 most affected genes:")
+    for i in top_diff_idx:
+        print(f"  {gene_names[i]:<20}  mean_diff = {diff[i]:+.4f}")
 
 
 print("\n✓ Exploration complete.")
