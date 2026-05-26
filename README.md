@@ -128,8 +128,29 @@ overview plots to `./causalbench_plots/`:
 
 Run with `python oles_data_exploration.py`.
 
+> **Note on the `"excluded"` label.** CausalBench's preprocessing assigns
+> the synthetic label `"excluded"` to every cell whose perturbation target
+> appears in fewer than 100 cells (preprocessing step 4 in
+> [causalbench_loader.py](causalbench_loader.py)). On K562 this bucket is
+> typically the single biggest "intervention" by cell count and dominates
+> any plot that ranks interventions or aggregates over "perturbed" cells.
+> All plots in this script therefore exclude that bucket: section 5a/5b
+> drop it from the top-30 bar and cells-per-perturbed-gene histogram, and
+> section 6 builds `pert_mask` from real perturbations only (`~ctrl_mask
+> & ~excluded_mask`). Section 4's printout still reports `n_excluded` so
+> you can see how many cells the filter removed.
+
+#### Explanation of produced plots
+Overview plot (2x2 grid):
+top left:
+ - Each bar is one CRISPR knockout experiemnt (independent variable), measured against no. of cells 6 days after transduction (dependent variable). All CRISPR knockout experiments show significantly fewer cells counted after 6 days of transduction, suggesting targeted genes play essential roles in growth, metabolism or reproduction. Baseline is non-targeting where no knockout occurs
+top right:
+ - Essentially a histogram of the left plot, groups genes based off how many cells they ended up with at the end of the 6 days. Low median of 132 means we are in low-sample regime, therefore will be lots of uncertainty in recovered causal ordering; i.e. need to ensure use of bootstrapping
+bottom left:
+ - Ri
+
 ### [oles_playground.ipynb](oles_playground.ipynb)
-Notebook for interactive prototyping. Six cells:
+Notebook for interactive prototyping. Five cells:
 
 1. Download raw data (`download_raw_data`)
 2. Preprocess (`preprocess`)

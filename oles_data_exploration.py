@@ -92,17 +92,30 @@ print(f"Mean expression per gene            : {expression_matrix.mean(axis=0).me
 
 
 # ── 4. Intervention distribution ─────────────────────────────────────────────
+# "excluded" is a synthetic label that preprocessing assigns to cells whose
+# perturbation appears in fewer than 100 cells (see causalscbench preprocessing
+# step 4). It typically dominates the count, so we drop it from the plots below
+# but report its size here for context.
 print("\n── 4. Intervention distribution ──")
 intervention_counts = Counter(interventions)
 n_unique = len(intervention_counts)
 n_control = intervention_counts.get("non-targeting", 0)
-print(f"Unique intervention targets (incl. control): {n_unique}")
-print(f"Control cells ('non-targeting')            : {n_control:,}  ({n_control/n_cells:.1%})")
-print(f"Cells under a gene perturbation            : {n_cells - n_control:,}")
+n_excluded = intervention_counts.get("excluded", 0)
+n_real_pert = n_cells - n_control - n_excluded
+print(f"Unique intervention targets (incl. control + 'excluded'): {n_unique}")
+print(f"Control cells ('non-targeting')                          : {n_control:,}  ({n_control/n_cells:.1%})")
+print(f"Cells with rare perturbation ('excluded' label)          : {n_excluded:,}  ({n_excluded/n_cells:.1%})")
+print(f"Cells under a real, kept perturbation                    : {n_real_pert:,}  ({n_real_pert/n_cells:.1%})")
 
-# Top 20 most common interventions
-top20 = intervention_counts.most_common(20)
-print("\nTop 20 most common interventions:")
+# Counts used for plotting — drop the "excluded" bucket so it doesn't
+# dominate the distributions. Section 4's printout keeps it visible.
+intervention_counts_plot = Counter({
+    k: v for k, v in intervention_counts.items() if k != "excluded"
+})
+
+# Top 20 most common interventions (after dropping "excluded")
+top20 = intervention_counts_plot.most_common(20)
+print("\nTop 20 most common interventions (excluding 'excluded'):")
 for name, count in top20:
     print(f"  {name:<25} {count:>6,} cells")
 
@@ -114,25 +127,27 @@ fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 fig.suptitle(f"{DATASET}  –  {REGIME}", fontsize=14, fontweight="bold")
 
 
-# 5a. Cells per intervention (top 30)
+# 5a. Cells per intervention (top 30) — 'excluded' bucket dropped
 ax = axes[0, 0]
-top30_names  = [x[0] for x in intervention_counts.most_common(30)]
-top30_counts = [x[1] for x in intervention_counts.most_common(30)]
+top30_names  = [x[0] for x in intervention_counts_plot.most_common(30)]
+top30_counts = [x[1] for x in intervention_counts_plot.most_common(30)]
 colors = ["#e74c3c" if n == "non-targeting" else "#3498db" for n in top30_names]
 ax.barh(top30_names[::-1], top30_counts[::-1], color=colors[::-1])
 ax.set_xlabel("Number of cells")
-ax.set_title("Cells per intervention (top 30)\n  red = control")
+ax.set_title("Cells per intervention (top 30)\n  red = control · 'excluded' dropped")
 ax.tick_params(axis="y", labelsize=7)
 
 
-# 5b. Distribution of cells-per-intervention (excluding control)
+# 5b. Distribution of cells-per-intervention (control + 'excluded' dropped)
 ax = axes[0, 1]
-per_gene_counts = [v for k, v in intervention_counts.items() if k != "non-targeting"]
+per_gene_counts = [
+    v for k, v in intervention_counts_plot.items() if k != "non-targeting"
+]
 if per_gene_counts:
     ax.hist(per_gene_counts, bins=40, color="#2ecc71", edgecolor="white")
     ax.set_xlabel("Cells per perturbed gene")
     ax.set_ylabel("Number of genes")
-    ax.set_title("Distribution of cells per perturbed gene\n(control excluded)")
+    ax.set_title("Distribution of cells per perturbed gene\n(control + 'excluded' dropped)")
     ax.axvline(np.median(per_gene_counts), color="black", linestyle="--",
                label=f"Median = {int(np.median(per_gene_counts))}")
     ax.legend()
@@ -169,8 +184,11 @@ plt.show()
 # ── 6. Control vs perturbed: mean expression comparison ──────────────────────
 print("\n── 6. Control vs perturbed expression ──")
 
-ctrl_mask = np.array([x == "non-targeting" for x in interventions])
-pert_mask = ~ctrl_mask
+ctrl_mask     = np.array([x == "non-targeting" for x in interventions])
+excluded_mask = np.array([x == "excluded"      for x in interventions])
+# "perturbed" = real, kept perturbations only — drop the synthetic 'excluded'
+# bucket so it doesn't drown the MA plot.
+pert_mask = ~ctrl_mask & ~excluded_mask
 
 if not pert_mask.any() or not ctrl_mask.any():
     print(f"  skipped — regime {REGIME!r} has no perturbed and/or no control cells")
