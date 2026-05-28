@@ -147,7 +147,18 @@ top left:
 top right:
  - Essentially a histogram of the left plot, groups genes based off how many cells they ended up with at the end of the 6 days. Low median of 132 means we are in low-sample regime, therefore will be lots of uncertainty in recovered causal ordering; i.e. need to ensure use of bootstrapping
 bottom left:
- - Ri
+ - Mean expression is just the average expression value of a cell for the given gene, e.g. if gene $i$ has expression values [0,2,1,0,3] across 5 cells, its mean expression value is 1.2. Expression value is a count of how many RNA molecules of that gene were detected in that cell at the time of measurement. Higher value means gene was more active in that cell at the moment of recording. The graph shows this value to be roughly right skewed, with low average but tail of highly expressive genes - good news for LiNGAM as non-Gaussianity assumption plausibly satisfied
+bottom right:
+ - How many RNA molecules detected per cell, log scale also. Fairly tight and bell-shaped around roughly 900 total counts per cell (raw). Narrow spread means cells are reasonably homogeneous in sequencing depth, meaning differences between cells are more likely to reflect true biological variation than technical noise from unequal sequencing.
+
+MA plot:
+ - Each dot is one gene, x-axis represents how commonly expressed the gene is, the further to the right the more commonly expressed, y-axis is the log2 fold-change - how much the average expression of that gene changes when you pool all perturbed cells together and compare to controls. Qualitatively, on average across all knockouts how does the expression of gene $y$ change. 
+ - Nothing crosses the $\pm$ 0.5 dashed line, meaning the genes are not effected dramatically when you average across all peturbations indisriminantly. Labelled genes are ones with biggest change - they are all on low-expression genes, therefore highly-expressed housekeeping genes stable across all conditions
+
+Correlation heatmap:
+ - Shows pairwise Pearson correlation between 40 random genes across all cells
+ - Most points appear white therefore little corration between any genes in this random sample
+ - This is an issue for classical methods, but not for LiNGAM as it is looking at residuals between genes, and from earlier plot we saw that the shape of distribution for genes non-Gaussian
 
 ### [oles_playground.ipynb](oles_playground.ipynb)
 Notebook for interactive prototyping. Five cells:
@@ -157,7 +168,7 @@ Notebook for interactive prototyping. Five cells:
 3. Apply regime + unpack arrays (`load_split`)
 4. Import `lingam`
 5. Toy `DirectLiNGAM` run on the first 100 cells × top-10 highest-variance
-   genes — a smoke test of the model on the pipeline output
+   genes — a test of the model on the pipeline output
 
 ---
 
