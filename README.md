@@ -91,7 +91,7 @@ python oles_data_exploration.py
 | `load_split`            | < 1 s                 | < 1 s |
 | `oles_data_exploration.py` end-to-end | 10–30 min | < 5 s after step 3 |
 
-Both `./causalbench_data/` and `./causalbench_plots/` are gitignored.
+`./causalbench_data/` gitignored.
 
 ### Troubleshooting
 
@@ -159,6 +159,17 @@ Correlation heatmap:
  - Shows pairwise Pearson correlation between 40 random genes across all cells
  - Most points appear white therefore little corration between any genes in this random sample
  - This is an issue for classical methods, but not for LiNGAM as it is looking at residuals between genes, and from earlier plot we saw that the shape of distribution for genes non-Gaussian
+
+Residual non-Gaussianity plot (2x2 grid):
+This plot replaces what the bottom-left of the overview plot was trying to check. The marginal distribution of mean expression per gene is not the object LiNGAM's identifiability theorem cares about — it cares about the residual $e_i$ left over after regressing $x_i$ on its causal parents, in $x_i = \sum_{k(j)<k(i)} b_{ij} x_j + e_i$. Since we don't know the causal parents yet, we do a pairwise OLS between top high-variance genes as a proxy and look at those residuals.
+top left:
+ - Scatter of one gene's expression against another's, top 10 high-variance pair, with the fitted OLS line in red. The pair is deliberately chosen as the hardest case — the ordered pair whose residuals are closest to Gaussian — so if the next three panels reject Gaussianity here, the easier pairs are fine too.
+top right:
+ - Histogram of the residuals from that regression with a fitted $N(\hat\mu, \hat\sigma^2)$ overlaid. These residuals are the $e_i$ that LiNGAM actually cares about. If the histogram is visibly heavier in the tails than the dashed red Gaussian (positive excess kurtosis), the non-Gaussianity assumption is plausibly satisfied — the e's are the heavy-tailed noise that LiNGAM needs.
+bottom left:
+ - Q–Q plot of the same residuals against a standard Normal. Pure Gaussian residuals would lie on the red 45° line; ends curving away from it indicate departure from normality. Tails curving up at the top-right and down at the bottom-left is the classic heavy-tail signature.
+bottom right:
+ - Histogram of excess kurtosis across all 90 ordered pairs (not just the representative one). Black vertical line is the Gaussian reference (kurt = 0); red dashed line is the median across pairs. If most of the mass sits well to the right of zero, the typical pair looks like the representative one — i.e. non-Gaussianity isn't fluke-true on one example, it's true across the board, and LiNGAM's identifiability guarantee plausibly applies to this dataset.
 
 ### [oles_playground.ipynb](oles_playground.ipynb)
 Notebook for interactive prototyping. Five cells:

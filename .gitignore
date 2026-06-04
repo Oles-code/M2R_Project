@@ -1,3 +1,7 @@
 m2r_venv/
 causalbench_data/
-causalbench_plots/
+
+# Python bytecode caches — regenerated on import, platform-specific.
+__pycache__/
+*.pyc
+*.pyo

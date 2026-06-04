@@ -34,6 +34,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from scipy import stats
 
 from causalbench_loader import download_raw_data, preprocess, load_split
 
@@ -280,6 +281,127 @@ else:
     print(f"\nTop 10 most affected genes:")
     for i in top_diff_idx:
         print(f"  {gene_names[i]:<20}  mean_diff = {diff[i]:+.4f}")
+
+
+# ── 9. Residual non-Gaussianity check (LiNGAM assumption) ───────────────────
+# LiNGAM identifiability rests on the *residual* noise e_i in
+#     x_i = sum_{k(j) < k(i)} b_{ij} x_j + e_i
+# being non-Gaussian. The marginal distribution of x_i (and the histogram
+# of per-gene mean expressions in section 5c) is a different object and
+# can look perfectly Gaussian even when the residuals are heavy-tailed,
+# or vice versa.
+#
+# We don't know the causal structure yet, so as a proxy we run pairwise
+# linear regressions between the top high-variance genes and check
+# whether *those* residuals depart from Gaussianity. If they do, LiNGAM's
+# assumption is at least plausible on this data; if they look Gaussian,
+# the model's identifiability guarantees collapse.
+print("\n── 9. Residual non-Gaussianity check (LiNGAM assumption) ──")
+
+N_GENES_RES = 10  # top high-variance genes to pair up
+
+gene_var_all = expression_matrix.var(axis=0)
+top_var_idx  = np.argsort(gene_var_all)[-N_GENES_RES:][::-1]
+top_var_names = [gene_names[i] for i in top_var_idx]
+
+
+def _ols_residuals(x, y):
+    """OLS y ~ x with intercept. Returns (residuals, [slope, intercept])."""
+    A = np.column_stack([x, np.ones_like(x)])
+    coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+    return y - A @ coef, coef
+
+
+pairs = [(i, j) for i in range(N_GENES_RES)
+                for j in range(N_GENES_RES) if i != j]
+ex_kurts = np.empty(len(pairs))
+skews    = np.empty(len(pairs))
+sw_pvals = np.empty(len(pairs))
+
+# Shapiro–Wilk is defined for n ∈ [3, 5000]; subsample once and reuse.
+n_for_sw = min(5000, expression_matrix.shape[0])
+rng_np   = np.random.default_rng(0)
+sw_idx   = rng_np.choice(expression_matrix.shape[0], size=n_for_sw, replace=False)
+
+for k, (i, j) in enumerate(pairs):
+    x = expression_matrix[:, top_var_idx[i]]
+    y = expression_matrix[:, top_var_idx[j]]
+    r, _ = _ols_residuals(x, y)
+    ex_kurts[k] = stats.kurtosis(r)          # Fisher: 0 = Gaussian
+    skews[k]    = stats.skew(r)              # 0 = symmetric
+    sw_pvals[k] = stats.shapiro(r[sw_idx]).pvalue
+
+print(f"\nOrdered pairs analyzed       : {len(pairs)}  (top {N_GENES_RES} high-variance genes)")
+print(f"Median excess kurtosis       : {np.median(ex_kurts):+.3f}  (Gaussian = 0)")
+print(f"Median |skewness| of resids  : {np.median(np.abs(skews)):+.3f}  (Gaussian = 0)")
+print(f"Shapiro–Wilk rejections @α=0.05 : {(sw_pvals < 0.05).sum()}/{len(pairs)}  (low p ⇒ non-Gaussian ⇒ good for LiNGAM)")
+
+# Concrete pair to visualise: pick the one whose residuals are CLOSEST
+# to Gaussian (smallest |excess kurtosis|). Showing the hardest case
+# means a clean rejection here implies the easier pairs are fine too.
+rep_idx = int(np.argmin(np.abs(ex_kurts)))
+i_rep, j_rep = pairs[rep_idx]
+x_rep = expression_matrix[:, top_var_idx[i_rep]]
+y_rep = expression_matrix[:, top_var_idx[j_rep]]
+r_rep, coef_rep = _ols_residuals(x_rep, y_rep)
+
+fig, axes = plt.subplots(2, 2, figsize=(13, 10))
+fig.suptitle(
+    f"Pairwise residual non-Gaussianity   ({DATASET}, {REGIME})",
+    fontsize=13, fontweight="bold")
+
+# 9a. Scatter + fitted line for the representative pair
+ax = axes[0, 0]
+plot_sample = rng_np.choice(len(x_rep), size=min(3000, len(x_rep)), replace=False)
+ax.scatter(x_rep[plot_sample], y_rep[plot_sample], s=3, alpha=0.3, color="#3498db")
+xs = np.linspace(x_rep.min(), x_rep.max(), 100)
+ax.plot(xs, coef_rep[0]*xs + coef_rep[1], "r-", linewidth=1.2,
+        label=f"y = {coef_rep[0]:+.2f}·x {coef_rep[1]:+.2f}")
+ax.set_xlabel(f"{top_var_names[i_rep]}  (x)")
+ax.set_ylabel(f"{top_var_names[j_rep]}  (y)")
+ax.set_title("Representative pair (hardest to reject Gaussianity)")
+ax.legend(loc="upper left")
+
+# 9b. Histogram of residuals + Gaussian overlay (same pair)
+ax = axes[0, 1]
+ax.hist(r_rep, bins=80, density=True, color="#2ecc71",
+        edgecolor="white", alpha=0.85)
+xs = np.linspace(r_rep.min(), r_rep.max(), 300)
+ax.plot(xs, stats.norm.pdf(xs, r_rep.mean(), r_rep.std()), "r--",
+        linewidth=1.5, label=f"N({r_rep.mean():.2f}, {r_rep.std():.2f}²)")
+sk = stats.skew(r_rep)
+kt = stats.kurtosis(r_rep)
+ax.set_xlabel("residual")
+ax.set_ylabel("density")
+ax.set_title(f"Residual histogram\nskew = {sk:+.2f},  excess kurt = {kt:+.2f}")
+ax.legend()
+
+# 9c. Q–Q plot of residuals vs. Normal (same pair)
+ax = axes[1, 0]
+stats.probplot(r_rep, dist="norm", plot=ax)
+ln = ax.get_lines()
+ln[0].set_markersize(2.5)
+ln[0].set_color("#3498db")
+ln[0].set_alpha(0.6)
+ax.set_title("Q–Q plot of residuals vs. Normal")
+
+# 9d. Distribution of excess kurtosis across all pairs (the population
+# view — one bar in 9a–9c is a single example, this is everyone).
+ax = axes[1, 1]
+ax.hist(ex_kurts, bins=30, color="#9b59b6", edgecolor="white", alpha=0.85)
+ax.axvline(0, color="black", linewidth=0.6, label="Gaussian (kurt = 0)")
+ax.axvline(np.median(ex_kurts), color="red", linestyle="--", linewidth=1,
+           label=f"median = {np.median(ex_kurts):+.2f}")
+ax.set_xlabel("excess kurtosis")
+ax.set_ylabel(f"# of {len(pairs)} ordered pairs")
+ax.set_title("Excess kurtosis across all pairwise residuals\n(|kurt| ≫ 0 ⇒ non-Gaussian ⇒ good for LiNGAM)")
+ax.legend()
+
+plt.tight_layout()
+save_path = os.path.join(OUTPUT_DIR, f"{DATASET}_{REGIME}_residual_nongaussianity.png")
+plt.savefig(save_path, dpi=150)
+print(f"\n  Saved residual non-Gaussianity plot → {save_path}")
+plt.show()
 
 
 print("\n✓ Exploration complete.")
