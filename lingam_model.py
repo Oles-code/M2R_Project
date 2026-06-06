@@ -314,6 +314,8 @@ def fit_lingam(
     # but we never expose the heavyweight BootstrapResult.
     bs_result = stacked
 
+    '''check this bootsrap code is all ok'''
+
     # Per-edge frequency = fraction of resamples where the coefficient
     # exceeded min_effect in magnitude.
     freq_matrix = (np.abs(stacked) > min_effect).mean(axis=0)

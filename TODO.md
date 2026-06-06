@@ -1,0 +1,5 @@
+ - [ ] Move unused files into gitnore?
+ - [ ] Change the readme into actual project readme detailing purpose of all files, and move current readme into setup.md file instead
+ - [ ] Check on the bootstrapping method/experiment with other versions
+ - [ ] Make sense of the acyclic predictions/can we alter the bootstrap to potentially be able to predict acyclic, i.e. in the direct lingam it only checks one direction based off order but if we reorder and check other direction in another sample maybe we can spot this?
+ - [ ] Improve the output of the model - use the 6 verdict categories (confirmed, refuted, false omission etc.)
