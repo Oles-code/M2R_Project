@@ -104,6 +104,14 @@ def main() -> None:
         "association graph down to direct effects, and recover a unique causal "
         "ordering.\n"
     )
+    lines.append(
+        "The strongly-correlated pairs are exactly where DirectLiNGAM's "
+        "ordering step is most fragile, so they are analysed separately — "
+        "cross-referenced against bootstrap directional stability and the "
+        "interventional verdicts — in `high_correlation_diagnostics.csv` and "
+        "the *High-Correlation Pair Diagnostics* section of "
+        "`causalbench_plots/validation_report.md`.\n"
+    )
 
     with open(OUT_PATH, "w") as f:
         f.write("\n".join(lines))

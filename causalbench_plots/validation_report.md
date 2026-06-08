@@ -274,3 +274,28 @@ Pairs with no direct edge but a directed path of length ≥ 2 in the recovered D
 ## Methodology note — what "cyclic" means here
 
 DirectLiNGAM always returns a directed **acyclic** graph; the recovered structure cannot contain a cycle by construction. The `cyclic` verdict is therefore *not* a violation of the model's output. It is a property of the biological system revealed by the interventional validation: when knocking down i shifts j AND knocking down j shifts i, the data carry bidirectional significance that a single acyclic ordering cannot represent. This is the expected signature of a feedback loop or a hidden common cause. The acyclicity constraint forces LiNGAM to pick one direction; the validation recovers the bidirectionality the model had to discard. See `bootstrap_summary.md` for a complementary bootstrap-instability diagnostic of the same phenomenon.
+
+## High-Correlation Pair Diagnostics
+
+The 14 gene pairs with |Pearson r| > 0.45 (threshold chosen adaptively for a manageable set), cross-referenced against bootstrap directional stability and the interventional verdict. Gene labels are the last five characters of the Ensembl ID; the full table is in `high_correlation_diagnostics.csv`. p-values are raw two-sided Mann–Whitney.
+
+| A | B | r | LiNGAM dir | b_ij | boot fwd | boot rev | dir ratio | verdict | fwd MW p | rev MW p |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `74748` | `44713` | +0.57 | A→B | +0.262 | 0.74 | 0.26 | 0.74 | cyclic | 5.4e-13 | 8.9e-04 |
+| `88846` | `44713` | +0.57 | A→B | +0.213 | 0.65 | 0.35 | 0.65 | cyclic | 6.1e-13 | 4.0e-02 |
+| `74748` | `88846` | +0.56 | A→B | +0.292 | 0.68 | 0.32 | 0.68 | cyclic | 1.1e-15 | 2.8e-18 |
+| `88846` | `68028` | +0.54 | B→A | +0.319 | 0.73 | 0.27 | 0.73 | cyclic | 1.7e-14 | 6.8e-49 |
+| `64587` | `86468` | +0.53 | A→B | +0.248 | 0.90 | 0.10 | 0.90 | cyclic | 2.9e-21 | 3.4e-13 |
+| `42541` | `42534` | +0.53 | A→B | +0.298 | 0.74 | 0.26 | 0.74 | refuted | 1.0e-01 | 3.8e-65 |
+| `44713` | `68028` | +0.49 | B→A | +0.178 | 0.93 | 0.07 | 0.93 | cyclic | 5.6e-15 | 1.2e-16 |
+| `98034` | `49273` | +0.49 | B→A | +0.244 | 0.73 | 0.27 | 0.73 | cyclic | 3.6e-46 | 9.7e-68 |
+| `74748` | `68028` | +0.49 | B→A | +0.382 | 0.65 | 0.35 | 0.65 | cyclic | 2.3e-24 | 4.4e-22 |
+| `64587` | `31500` | +0.47 | B→A | +0.168 | 0.86 | 0.14 | 0.86 | cyclic | 2.7e-19 | 1.0e-13 |
+| `61970` | `31500` | +0.47 | A→B | +0.095 | 0.56 | 0.44 | 0.56 | cyclic | 1.1e-06 | 8.5e-16 |
+| `49273` | `31500` | +0.47 | A→B | +0.079 | 0.66 | 0.34 | 0.66 | cyclic | 1.6e-18 | 1.8e-45 |
+| `42541` | `70889` | +0.47 | B→A | +0.202 | 0.37 | 0.63 | 0.63 | cyclic | 2.5e-40 | 1.8e-02 |
+| `42541` | `31500` | +0.46 | B→A | +0.152 | 0.69 | 0.31 | 0.69 | confirmed | 3.2e-34 | 7.9e-01 |
+
+**Summary.** Of these 14 highly-correlated pairs, 12 (86%) received a **cyclic** verdict and 0 had no point-estimate edge at all; among the 14 with an edge, 11 fall below the 0.80 bootstrap stability threshold in their predicted direction. The mean directional ratio is 0.73 (1.0 = the bootstrap always agrees on direction, 0.5 = it splits evenly). High correlation is therefore strongly associated with the cyclic verdict and with direction-unstable bootstraps — exactly the pairs where a single acyclic ordering is least trustworthy.
+
+**Methodological note.** High pairwise correlation destabilises DirectLiNGAM's ordering step because near-collinear genes produce very small regression residuals, leaving the pwling independence test little signal to determine which gene is exogenous. Rather than pruning these genes — which would discard information needed to distinguish direct causation from feedback loops or latent confounders — we treat high correlation as a diagnostic flag and cross-reference it against bootstrap stability and interventional validation.

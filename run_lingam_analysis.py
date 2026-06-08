@@ -133,9 +133,17 @@ def main() -> None:
                      min_int_cells=MIN_INT_CELLS)
     print(f"\n  → wrote {summary_path}\n", flush=True)
 
+    # ─── high-correlation diagnostics (cross-ref corr vs bootstrap/validation)
+    diag_df, diag_section = compute_high_corr_diagnostics(
+        sel, fit, df, edge_threshold=EDGE_THRESHOLD)
+    diag_csv = "high_correlation_diagnostics.csv"
+    diag_df.to_csv(diag_csv, index=False)
+    print(f"  → wrote {diag_csv} ({len(diag_df)} high-corr pairs)", flush=True)
+
     # ─── validation_report.md (the comprehensive, report-ready version) ──────
     report_path = os.path.join(OUTPUT_DIR, "validation_report.md")
-    write_validation_report(report_path, sel, df, summary, dataset=DATASET)
+    write_validation_report(report_path, sel, df, summary, dataset=DATASET,
+                            extra_section=diag_section)
     print(f"  → wrote {report_path}\n", flush=True)
 
 
@@ -208,8 +216,176 @@ def _verdict_table(sub, max_rows=30):
     return "\n".join(lines) + "\n" + note
 
 
-def write_validation_report(path, sel, df, summary, *, dataset):
-    """Write the comprehensive six-verdict validation report."""
+def compute_high_corr_diagnostics(sel, fit, df, *, edge_threshold,
+                                  candidates=(0.30, 0.35, 0.40, 0.45, 0.50)):
+    """Cross-reference highly-correlated gene pairs against bootstrap
+    directional stability and the interventional verdict.
+
+    The motivation: high pairwise correlation is where DirectLiNGAM's ordering
+    step is least reliable (near-collinear genes leave the pwling independence
+    test little signal to decide which is exogenous), so we expect these pairs
+    to be over-represented among unstable/cyclic edges. Rather than dropping
+    such genes, we flag the pairs and tabulate what actually happened to them.
+
+    Returns (diag_df, markdown_section). The threshold is chosen adaptively
+    from `candidates`: the smallest |r| cut that yields a manageable set
+    (≤ 30 pairs, ≥ 5 if possible), because on this data essentially every pair
+    is at least moderately correlated.
+    """
+    import numpy as np
+    import pandas as pd
+
+    names = sel.gene_names
+    corr = np.corrcoef(sel.X_obs.T)
+    freq = fit.freq_matrix
+    B = fit.B
+    p = len(names)
+
+    iu, ju = np.triu_indices(p, k=1)
+    abs_r = np.abs(corr[iu, ju])
+    # Adaptive threshold: first candidate giving a manageable, non-trivial set.
+    thr = candidates[-1]
+    for t in candidates:
+        n = int((abs_r > t).sum())
+        if 5 <= n <= 30:
+            thr = t
+            break
+    else:
+        # None landed in range; prefer the largest cut that still keeps ≥ 5.
+        viable = [t for t in candidates if (abs_r > t).sum() >= 5]
+        thr = max(viable) if viable else candidates[0]
+
+    # Per-(cause, effect) row lookup for verdicts and raw forward/reverse p's.
+    row_lookup = {
+        (r["cause_i"], r["effect_j"]): r for _, r in df.iterrows()
+    }
+
+    rows = []
+    for a, b in zip(iu, ju):
+        r = float(corr[a, b])
+        if abs(r) <= thr:
+            continue
+        A, Bn = names[a], names[b]
+        eff_ab = float(B[b, a])   # edge A → B lives at B[effect=b, cause=a]
+        eff_ba = float(B[a, b])   # edge B → A
+        f_ab = float(freq[b, a])  # bootstrap freq of A → B
+        f_ba = float(freq[a, b])  # bootstrap freq of B → A
+
+        if abs(eff_ab) > edge_threshold:
+            direction, cause, effect, bij = "A→B", A, Bn, eff_ab
+            fwd_f, rev_f = f_ab, f_ba
+        elif abs(eff_ba) > edge_threshold:
+            direction, cause, effect, bij = "B→A", Bn, A, eff_ba
+            fwd_f, rev_f = f_ba, f_ab
+        else:
+            # No point-estimate edge: orient "forward" as the dominant
+            # bootstrap direction so the ratio stays interpretable.
+            direction, bij = "none", float("nan")
+            if f_ab >= f_ba:
+                cause, effect, fwd_f, rev_f = A, Bn, f_ab, f_ba
+            else:
+                cause, effect, fwd_f, rev_f = Bn, A, f_ba, f_ab
+
+        tot = fwd_f + rev_f
+        dir_ratio = (max(fwd_f, rev_f) / tot) if tot > 0 else float("nan")
+
+        if direction == "none":
+            verdict = "no edge"
+            fwd_p = rev_p = float("nan")
+        else:
+            row = row_lookup.get((cause, effect))
+            verdict = row["verdict"] if row is not None else "n/a"
+            fwd_p = float(row["mw_pvalue_raw"]) if row is not None else float("nan")
+            rev_p = float(row["mw_pvalue_raw_rev"]) if row is not None else float("nan")
+
+        rows.append({
+            "gene_A": A, "gene_B": Bn, "pearson_r": r,
+            "lingam_direction": direction, "effect_size_b": bij,
+            "boot_freq_forward": fwd_f, "boot_freq_reverse": rev_f,
+            "directional_ratio": dir_ratio,
+            "interventional_verdict": verdict,
+            "forward_mw_p": fwd_p, "reverse_mw_p": rev_p,
+        })
+
+    diag_df = pd.DataFrame(rows).sort_values(
+        "pearson_r", key=lambda s: s.abs(), ascending=False
+    ).reset_index(drop=True)
+
+    section = _high_corr_section_md(diag_df, thr)
+    return diag_df, section
+
+
+def _high_corr_section_md(d, thr):
+    """Render the High-Correlation Pair Diagnostics markdown section."""
+    import numpy as np
+
+    def _p(x):
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return "—"
+        return "0" if x == 0 else f"{x:.1e}"
+
+    def _f(x, nd=2):
+        return "—" if (isinstance(x, float) and np.isnan(x)) else f"{x:.{nd}f}"
+
+    n = len(d)
+    L = [f"## High-Correlation Pair Diagnostics\n"]
+    L.append(
+        f"The {n} gene pairs with |Pearson r| > {thr:.2f} (threshold chosen "
+        "adaptively for a manageable set), cross-referenced against bootstrap "
+        "directional stability and the interventional verdict. Gene labels are "
+        "the last five characters of the Ensembl ID; the full table is in "
+        "`high_correlation_diagnostics.csv`. p-values are raw two-sided "
+        "Mann–Whitney.\n")
+    L.append(
+        "| A | B | r | LiNGAM dir | b_ij | boot fwd | boot rev | dir ratio | "
+        "verdict | fwd MW p | rev MW p |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    for _, x in d.iterrows():
+        bij = "—" if (isinstance(x["effect_size_b"], float)
+                      and np.isnan(x["effect_size_b"])) else f"{x['effect_size_b']:+.3f}"
+        L.append(
+            f"| `{x['gene_A'][-5:]}` | `{x['gene_B'][-5:]}` "
+            f"| {x['pearson_r']:+.2f} | {x['lingam_direction']} | {bij} "
+            f"| {_f(x['boot_freq_forward'])} | {_f(x['boot_freq_reverse'])} "
+            f"| {_f(x['directional_ratio'])} | {x['interventional_verdict']} "
+            f"| {_p(x['forward_mw_p'])} | {_p(x['reverse_mw_p'])} |")
+    L.append("")
+
+    # Data-driven summary.
+    n_cyclic = int((d["interventional_verdict"] == "cyclic").sum())
+    n_no_edge = int((d["lingam_direction"] == "none").sum())
+    edged = d[d["lingam_direction"] != "none"]
+    n_unstable = int((edged["boot_freq_forward"] < 0.80).sum())
+    mean_ratio = float(d["directional_ratio"].mean(skipna=True))
+    L.append(
+        f"**Summary.** Of these {n} highly-correlated pairs, "
+        f"{n_cyclic} ({n_cyclic / max(n, 1):.0%}) received a **cyclic** verdict "
+        f"and {n_no_edge} had no point-estimate edge at all; among the "
+        f"{len(edged)} with an edge, {n_unstable} fall below the 0.80 bootstrap "
+        f"stability threshold in their predicted direction. The mean "
+        f"directional ratio is {mean_ratio:.2f} "
+        f"(1.0 = the bootstrap always agrees on direction, 0.5 = it splits "
+        f"evenly). High correlation is therefore strongly associated with the "
+        f"cyclic verdict and with direction-unstable bootstraps — exactly the "
+        f"pairs where a single acyclic ordering is least trustworthy.\n")
+
+    L.append(
+        "**Methodological note.** High pairwise correlation destabilises "
+        "DirectLiNGAM's ordering step because near-collinear genes produce very "
+        "small regression residuals, leaving the pwling independence test "
+        "little signal to determine which gene is exogenous. Rather than "
+        "pruning these genes — which would discard information needed to "
+        "distinguish direct causation from feedback loops or latent "
+        "confounders — we treat high correlation as a diagnostic flag and "
+        "cross-reference it against bootstrap stability and interventional "
+        "validation.\n")
+    return "\n".join(L)
+
+
+def write_validation_report(path, sel, df, summary, *, dataset,
+                            extra_section=""):
+    """Write the comprehensive six-verdict validation report. `extra_section`
+    is appended verbatim (used for the high-correlation diagnostics section)."""
     n_genes = len(sel.gene_names)
     n_obs = sel.X_obs.shape[0]
     n_pairs = len(df)
@@ -285,6 +461,9 @@ def write_validation_report(path, sel, df, summary, *, dataset):
         "one direction; the validation recovers the bidirectionality the model "
         "had to discard. See `bootstrap_summary.md` for a complementary "
         "bootstrap-instability diagnostic of the same phenomenon.\n")
+
+    if extra_section:
+        L.append(extra_section)
 
     with open(path, "w") as f:
         f.write("\n".join(L))

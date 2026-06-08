@@ -1,30 +1,30 @@
 """
 visualize_graph
 ===============
-Annotated causal-graph figure for the recovered LiNGAM structure.
+Annotated causal-graph figure for the recovered LiNGAM structure, plus a
+secondary Wasserstein-vs-bootstrap-frequency scatter.
 
-The figure encodes four things on top of the bare DAG so the report can show
-"what the model claims AND how much we believe each claim":
+The graph is rendered with matplotlib (node positions come from graphviz's
+`neato` engine via pydot when available, else a deterministic kamada–kawai
+layout). matplotlib is used for the drawing itself because it gives precise
+control over the things a report needs: a compact corner legend, dashed
+"recede" styling for unstable edges, |b|-scaled edge widths, an on-figure
+footnote, and 300-DPI PNG + SVG export.
 
-    edge colour     verdict from the interventional validation
-                      green   : confirmed (predicted edge, MW-significant after BH)
-                      red     : refuted   (predicted edge, MW NOT significant)
-                      orange  : cyclic    (confirmed but reverse also significant)
-                      grey    : unstable  (predicted but bootstrap freq < threshold)
+Edge encoding
+-------------
+    colour      verdict from interventional validation, for *stable* edges
+                  green   confirmed   (predicted, MW-significant after BH)
+                  red     refuted     (predicted, NOT MW-significant)
+                  orange  cyclic      (confirmed + reverse direction also sig)
+    grey dashed unstable (bootstrap frequency below `freq_threshold`) — drawn
+                thin and dashed so it recedes behind the confirmed structure.
+    width       proportional to |b_ij|, floored so coloured edges stay bold.
+    hidden      edges below `hide_below_freq` are dropped entirely and counted
+                in a footnote, so the densest noise doesn't swamp the figure.
 
-    edge thickness  proportional to |b_ij| from the point-estimate B —
-                    visually weights how strong the SEM coefficient is.
-
-    edge opacity    proportional to bootstrap selection frequency — visually
-                    distinguishes "near-universal in resamples" from "barely
-                    above threshold".
-
-A legend is added as a separate subgraph cluster so the colour mapping is
-self-documenting in the saved PNG.
-
-Optional secondary figure: scatter of Wasserstein distance vs bootstrap
-frequency for predicted edges, which separates strong + stable edges from
-weak ones at a glance.
+A `.gv` DOT source mirroring the drawn graph is also written, so the structure
+remains available as a text artefact (and SUMMARY.md's link stays valid).
 """
 
 from __future__ import annotations
@@ -32,7 +32,6 @@ from __future__ import annotations
 import os
 from typing import List
 
-import numpy as np
 import pandas as pd
 
 from lingam_model import LingamFit, SelectionResult
@@ -53,49 +52,35 @@ EDGE_COLOURS = {
 }
 
 
-def _opacity_to_hex(o: float) -> str:
-    """Map [0, 1] opacity to a two-char hex alpha suffix usable by graphviz."""
-    o = max(0.15, min(1.0, float(o)))   # clamp so the edge is never invisible
-    return f"{int(round(o * 255)):02X}"
-
-
-def _edge_width(b: float, b_max: float, w_min: float = 0.6, w_max: float = 4.0) -> float:
-    """Map |b| to a graphviz pen width on a linear scale capped at w_max."""
-    if not np.isfinite(b) or b_max <= 0:
-        return w_min
-    return w_min + (w_max - w_min) * (abs(b) / b_max)
-
-
 def _pick_subset_nodes(
     df: pd.DataFrame,
     gene_names: List[str],
     max_nodes: int = 15,
 ) -> List[str]:
     """Pick a readable subset of nodes: prefer those touching confirmed edges,
-    then refuted, then any predicted edge, until we hit `max_nodes`.
+    then cyclic, then refuted, until we hit `max_nodes`.
 
-    Returns gene names in `gene_names` order to keep colour-independent
-    layout stable across runs.
+    Returns gene names in `gene_names` order to keep the node set stable across
+    runs regardless of which verdict introduced a node.
     """
-    touched: list = []
     seen = set()
-    priority_order = [CONFIRMED, CYCLIC, REFUTED]
-    for verdict in priority_order:
+    touched = 0
+    for verdict in (CONFIRMED, CYCLIC, REFUTED):
         sub = df[df["verdict"] == verdict]
         for _, r in sub.iterrows():
             for g in (r["cause_i"], r["effect_j"]):
                 if g not in seen:
                     seen.add(g)
-                    touched.append(g)
-                    if len(touched) >= max_nodes:
+                    touched += 1
+                    if touched >= max_nodes:
                         return [g for g in gene_names if g in seen]
     # Pad with any remaining genes (preserving the canonical ordering) so the
-    # graph still has a sensible number of nodes even if no edges were found.
+    # graph still has a sensible number of nodes even if few edges were found.
     for g in gene_names:
         if g not in seen:
             seen.add(g)
-            touched.append(g)
-            if len(touched) >= max_nodes:
+            touched += 1
+            if touched >= max_nodes:
                 break
     return [g for g in gene_names if g in seen]
 
@@ -109,152 +94,148 @@ def render_causal_graph(
     max_nodes: int = 15,
     freq_threshold: float = 0.8,
     edge_threshold: float = 0.01,
+    hide_below_freq: float = 0.50,
     label_short: bool = True,
     file_stem: str = "k562_causal_graph",
 ) -> dict:
-    """Build the annotated causal graph and save PNG, SVG, and .gv source.
-
-    Returns a dict with the saved paths and the chosen node subset, so the
-    orchestrator can reference them in SUMMARY.md.
+    """Render the annotated causal graph (PNG @ 300 DPI + SVG) and a `.gv`
+    source mirroring it. Returns a dict of saved paths + the chosen node subset.
     """
-    import graphviz
+    import matplotlib.pyplot as plt
+    import networkx as nx
+    from matplotlib.lines import Line2D
 
+    apply_style()
     os.makedirs(out_dir, exist_ok=True)
 
-    # Choose a readable subset and the indices into fit.B that hit it.
     subset = _pick_subset_nodes(df, sel.gene_names, max_nodes=max_nodes)
     idx_map = {g: i for i, g in enumerate(sel.gene_names)}
     subset_idx = [idx_map[g] for g in subset]
 
-    # Verdict lookup keyed by (cause, effect) for the subset.
+    def _label(name: str) -> str:
+        return name[-5:] if label_short else name
+
+    # Verdict / frequency lookup keyed by (cause, effect).
     verdict_lookup = {
         (r["cause_i"], r["effect_j"]): r for _, r in df.iterrows()
         if r["cause_i"] in idx_map and r["effect_j"] in idx_map
     }
 
-    # `fdp` is a force-directed engine (supports the legend cluster, unlike
-    # neato) that packs the nodes together instead of stretching them along a
-    # rank axis as `dot`+rankdir=LR did. `K` is the spring rest-length: small
-    # K + overlap=false gives a compact graph where the (enlarged) nodes are
-    # visually prominent and edges no longer dominate the figure.
-    g = graphviz.Digraph("causal", format="png", engine="fdp")
-    g.attr(overlap="false", splines="true", K="0.6", sep="+6",
-           label="Causal Graph", labelloc="t", fontsize="16",
-           fontname="Helvetica")
-    # Node defaults: large filled ellipses so nodes read as the primary
-    # objects and the edges between them stay short relative to node size.
-    g.attr("node", shape="ellipse", style="filled", fillcolor="#ecf0f1",
-           color="#7f8c8d", fontname="Helvetica", fontsize="14",
-           width="0.9", height="0.7", fixedsize="false")
-
-    # Truncated labels (last 5 chars of the Ensembl ID) make a 15-node graph
-    # readable. The full IDs go into the .gv source as comments so they are
-    # recoverable.
-    def _label(name: str) -> str:
-        if not label_short:
-            return name
-        return name[-5:]   # last 5 chars of ENSG…
-
-    for name in subset:
-        # Node styling comes from the graph-level node defaults set above; we
-        # only supply the (truncated) label and keep the full Ensembl ID as a
-        # comment so the truncation doesn't lose information in the .gv source.
-        g.node(name, label=_label(name), comment=name)
-
-    # Pick the global |b| scale across drawn edges so widths are comparable.
-    drawn = []
+    # Collect every point-estimate edge among the subset nodes. B[ei, ci] is
+    # the effect of cause ci on effect ei, i.e. the directed edge ci → ei.
+    cand = []  # (cause, effect, b, verdict, freq)
     for ci_name in subset:
         for ei_name in subset:
             if ci_name == ei_name:
                 continue
-            ci = idx_map[ci_name]; ei = idx_map[ei_name]
-            b = float(fit.B[ei, ci])
+            b = float(fit.B[idx_map[ei_name], idx_map[ci_name]])
             if abs(b) <= edge_threshold:
                 continue
-            drawn.append((ci_name, ei_name, b))
-    b_max = max((abs(b) for _, _, b in drawn), default=1.0)
+            row = verdict_lookup.get((ci_name, ei_name))
+            verdict = row["verdict"] if row is not None else "unknown"
+            freq = float(row["bootstrap_freq"]) if row is not None else 0.0
+            cand.append((ci_name, ei_name, b, verdict, freq))
 
-    for ci_name, ei_name, b in drawn:
-        row = verdict_lookup.get((ci_name, ei_name))
-        verdict = row["verdict"] if row is not None else "unknown"
-        freq = float(row["bootstrap_freq"]) if row is not None else 0.0
+    b_max = max((abs(c[2]) for c in cand), default=1.0)
 
-        # Colour: greyed-out below the bootstrap stability threshold,
-        # otherwise follow the verdict palette.
-        if freq < freq_threshold:
-            base = EDGE_COLOURS["unstable"]
-        else:
-            base = EDGE_COLOURS.get(verdict, "#34495e")  # dark grey fallback
+    # Drop the lowest-frequency edges entirely; they are mostly resampling
+    # noise and only clutter the figure. Their count goes in a footnote.
+    shown = [c for c in cand if c[4] >= hide_below_freq]
+    n_hidden = len(cand) - len(shown)
 
-        color = base + _opacity_to_hex(freq)
-        width = _edge_width(b, b_max)
+    # Split into stable (coloured, solid, bold) and unstable (grey, dashed,
+    # thin) so the believable structure stands out from the fragile edges.
+    def _width(b):
+        # Floor coloured edges at 1.5 so they read as bold; scale up with |b|.
+        return max(1.5, 1.5 + 3.0 * (abs(b) / b_max))
 
-        # Edge label = signed coefficient to 2 dp; useful for the report.
-        edge_label = f"{b:+.2f}"
-        g.edge(ci_name, ei_name, color=color, penwidth=f"{width:.2f}",
-               label=edge_label, fontsize="8", fontcolor=base)
+    stable, unstable = [], []
+    for c in shown:
+        (stable if c[4] >= freq_threshold else unstable).append(c)
 
-    # Legend as a separate subgraph, so it doesn't interact with the layout.
-    # We use individual filled boxes rather than an HTML-table label because
-    # graphviz's HTML-label parser is fussy and varies between versions —
-    # plain box nodes work in every graphviz install.
-    legend_entries = [
-        ("confirmed",            EDGE_COLOURS[CONFIRMED],
-         "predicted, MW-sig (BH)"),
-        ("refuted",              EDGE_COLOURS[REFUTED],
-         "predicted, NOT MW-sig"),
-        ("cyclic",               EDGE_COLOURS[CYCLIC],
-         "confirmed + reverse-dir MW-sig"),
-        ("unstable",             EDGE_COLOURS["unstable"],
-         f"bootstrap freq < {freq_threshold:.2f}"),
-    ]
-    with g.subgraph(name="cluster_legend") as legend:
-        legend.attr(label="Legend (edge colour = verdict)",
-                    style="rounded", fontsize="9", labeljust="l")
-        prev_id = None
-        for name, colour, desc in legend_entries:
-            node_id = f"legend_{name}"
-            legend.node(
-                node_id,
-                label=f"{name}\\n{desc}",
-                shape="box", style="filled",
-                fillcolor=colour, fontcolor="white",
-                fontsize="9", fontname="Helvetica",
-            )
-            if prev_id is not None:
-                # Invisible edges stack the legend nodes vertically so they
-                # don't get rearranged by the main graph layout.
-                legend.edge(prev_id, node_id, style="invis")
-            prev_id = node_id
+    # Build the graph for layout (all subset nodes, only the shown edges).
+    G = nx.DiGraph()
+    G.add_nodes_from(subset)
+    for ci_name, ei_name, *_ in shown:
+        G.add_edge(ci_name, ei_name)
 
-    base_path = os.path.join(out_dir, file_stem)
-    # The .gv source is the canonical reproducible artefact; the PNG / SVG
-    # are renderings of it. We write the .gv unconditionally so the output
-    # survives even when the system `dot` binary is missing (the Python
-    # `graphviz` package is just a wrapper around the CLI, so PNG/SVG
-    # rendering needs `brew install graphviz` or equivalent on PATH).
-    gv_src_path = base_path + ".gv"
-    with open(gv_src_path, "w") as f:
-        f.write(g.source)
-
-    png_path = None
-    svg_path = None
+    # neato (force-directed) spreads a dense graph far better than dot's ranked
+    # layout. pydot bridges to the graphviz binary; fall back to a deterministic
+    # kamada–kawai layout if either is unavailable.
     try:
-        # Both renders go through `g` so they use the fdp engine set above;
-        # rendering the SVG via a bare graphviz.Source would silently fall back
-        # to dot and produce a differently-laid-out figure.
-        png_path = g.render(filename=file_stem, directory=out_dir,
-                            format="png", cleanup=False)
-        svg_path = g.render(filename=file_stem + "_svg", directory=out_dir,
-                            format="svg", cleanup=True)
-    except graphviz.backend.execute.ExecutableNotFound:
-        # Fall back to a matplotlib + networkx render so we still produce
-        # a viewable figure when the `dot` CLI isn't installed.
-        png_path = _matplotlib_fallback(
-            fit, sel, df, subset, subset_idx, out_dir,
-            freq_threshold=freq_threshold, edge_threshold=edge_threshold,
-            file_stem=file_stem,
-        )
+        pos = nx.nx_pydot.graphviz_layout(G, prog="neato")
+    except Exception:
+        pos = nx.kamada_kawai_layout(G)
+
+    fig, ax = plt.subplots(figsize=(16, 12))
+    node_size = 2400
+    nx.draw_networkx_nodes(
+        G, pos, node_color="#f7f9fa", edgecolors="#34495e",
+        linewidths=1.2, node_size=node_size, ax=ax)
+    nx.draw_networkx_labels(
+        G, pos, labels={n: _label(n) for n in G.nodes},
+        font_size=13, font_family="sans-serif", ax=ax)
+
+    if stable:
+        nx.draw_networkx_edges(
+            G, pos, edgelist=[(c[0], c[1]) for c in stable],
+            edge_color=[EDGE_COLOURS.get(c[3], "#34495e") for c in stable],
+            width=[_width(c[2]) for c in stable],
+            style="solid", arrows=True, arrowsize=20, arrowstyle="-|>",
+            connectionstyle="arc3,rad=0.08", node_size=node_size, ax=ax)
+        # Effect-size labels only on the stable edges (small font), so the
+        # numbers annotate the believable structure without cluttering.
+        nx.draw_networkx_edge_labels(
+            G, pos,
+            edge_labels={(c[0], c[1]): f"{c[2]:+.2f}" for c in stable},
+            font_size=8, label_pos=0.5, rotate=False,
+            bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none",
+                      alpha=0.6), ax=ax)
+    if unstable:
+        nx.draw_networkx_edges(
+            G, pos, edgelist=[(c[0], c[1]) for c in unstable],
+            edge_color=EDGE_COLOURS["unstable"], width=0.8,
+            style="dashed", arrows=True, arrowsize=10, arrowstyle="-|>",
+            connectionstyle="arc3,rad=0.08", node_size=node_size,
+            alpha=0.7, ax=ax)
+
+    # Compact, matplotlib-style legend pinned to the top-right corner.
+    handles = [
+        Line2D([0], [0], color=EDGE_COLOURS[CONFIRMED], lw=2.5,
+               label="confirmed (MW-sig)"),
+        Line2D([0], [0], color=EDGE_COLOURS[REFUTED], lw=2.5,
+               label="refuted (not MW-sig)"),
+        Line2D([0], [0], color=EDGE_COLOURS[CYCLIC], lw=2.5,
+               label="cyclic (bidirectional MW-sig)"),
+        Line2D([0], [0], color=EDGE_COLOURS["unstable"], lw=1.2, ls="--",
+               label=f"unstable (bootstrap < {freq_threshold:.2f})"),
+    ]
+    ax.legend(handles=handles, loc="upper right", fontsize=9,
+              frameon=True, framealpha=0.92, borderpad=0.6,
+              handlelength=1.6, title="edge colour = verdict",
+              title_fontsize=9)
+
+    if n_hidden:
+        ax.text(0.01, 0.01,
+                f"{n_hidden} edges with bootstrap frequency "
+                f"< {hide_below_freq:.2f} hidden",
+                transform=ax.transAxes, fontsize=8, color="#666666",
+                ha="left", va="bottom")
+
+    ax.set_title("Causal Graph")
+    ax.set_axis_off()
+    ax.margins(0.08)
+    fig.tight_layout()
+
+    png_path = os.path.join(out_dir, file_stem + ".png")
+    svg_path = os.path.join(out_dir, file_stem + "_svg.svg")
+    fig.savefig(png_path, dpi=300)
+    fig.savefig(svg_path)
+    plt.close(fig)
+
+    gv_src_path = _write_gv_source(
+        subset, shown, b_max, out_dir, file_stem,
+        freq_threshold=freq_threshold, label_short=label_short)
 
     return {
         "subset_nodes": subset,
@@ -262,86 +243,37 @@ def render_causal_graph(
         "gv_source": gv_src_path,
         "png": png_path,
         "svg": svg_path,
+        "n_hidden": n_hidden,
     }
 
 
-def _matplotlib_fallback(
-    fit, sel, df, subset, subset_idx, out_dir,
-    *, freq_threshold, edge_threshold, file_stem,
-):
-    """Render the same graph with matplotlib + networkx when `dot` is missing.
+def _write_gv_source(
+    subset, shown, b_max, out_dir, file_stem, *, freq_threshold, label_short,
+) -> str:
+    """Write a DOT source mirroring the rendered graph (structure + verdict
+    colours). This is a text artefact only; the PNG/SVG are the figures."""
+    import graphviz
 
-    Less pretty than graphviz but doesn't require an extra system binary.
-    Same colour / width / opacity encoding as the graphviz version.
-    """
-    import matplotlib.pyplot as plt
-    import networkx as nx
-
-    idx_map = {g: i for i, g in enumerate(sel.gene_names)}
-    G = nx.DiGraph()
-    for g in subset:
-        G.add_node(g)
-
-    verdict_lookup = {
-        (r["cause_i"], r["effect_j"]): r for _, r in df.iterrows()
-        if r["cause_i"] in idx_map and r["effect_j"] in idx_map
-    }
-
-    edges, edge_colors, edge_widths = [], [], []
-    b_max = 0.0
-    for ci_name in subset:
-        for ei_name in subset:
-            if ci_name == ei_name:
-                continue
-            ci = idx_map[ci_name]; ei = idx_map[ei_name]
-            b = float(fit.B[ei, ci])
-            if abs(b) <= edge_threshold:
-                continue
-            row = verdict_lookup.get((ci_name, ei_name))
-            verdict = row["verdict"] if row is not None else "unknown"
-            freq = float(row["bootstrap_freq"]) if row is not None else 0.0
-            if freq < freq_threshold:
-                base = EDGE_COLOURS["unstable"]
-            else:
-                base = EDGE_COLOURS.get(verdict, "#34495e")
-            G.add_edge(ci_name, ei_name)
-            edges.append((ci_name, ei_name))
-            edge_colors.append(base)
-            edge_widths.append(abs(b))
-            b_max = max(b_max, abs(b))
-
-    if b_max > 0:
-        edge_widths = [0.6 + 3.4 * (w / b_max) for w in edge_widths]
-    else:
-        edge_widths = [0.6 for _ in edges]
-
-    fig, ax = plt.subplots(figsize=(11, 9))
-    pos = nx.spring_layout(G, seed=0, k=1.8 / max(1, len(G) ** 0.5))
-    nx.draw_networkx_nodes(G, pos, node_color="#ecf0f1",
-                           edgecolors="#7f8c8d", node_size=800, ax=ax)
-    nx.draw_networkx_labels(G, pos, labels={n: n[-5:] for n in G.nodes},
-                            font_size=8, ax=ax)
-    nx.draw_networkx_edges(G, pos, edgelist=edges, edge_color=edge_colors,
-                           width=edge_widths, arrows=True, arrowsize=10,
-                           connectionstyle="arc3,rad=0.05", ax=ax)
-
-    # Legend
-    from matplotlib.lines import Line2D
-    legend_handles = [
-        Line2D([0], [0], color=EDGE_COLOURS[CONFIRMED], lw=3, label="confirmed"),
-        Line2D([0], [0], color=EDGE_COLOURS[REFUTED],   lw=3, label="refuted"),
-        Line2D([0], [0], color=EDGE_COLOURS[CYCLIC],    lw=3, label="cyclic"),
-        Line2D([0], [0], color=EDGE_COLOURS["unstable"], lw=3,
-               label=f"unstable (freq < {freq_threshold:.2f})"),
-    ]
-    ax.legend(handles=legend_handles, loc="lower left", fontsize=8)
-    ax.set_title("Causal Graph")
-    ax.set_axis_off()
-    plt.tight_layout()
-    out = os.path.join(out_dir, file_stem + "_fallback.png")
-    fig.savefig(out, dpi=150)
-    plt.close(fig)
-    return out
+    g = graphviz.Digraph("causal", engine="neato")
+    g.attr(overlap="false", splines="true", label="Causal Graph",
+           labelloc="t", fontsize="16", fontname="Helvetica")
+    g.attr("node", shape="ellipse", style="filled", fillcolor="#f7f9fa",
+           color="#34495e", fontname="Helvetica", fontsize="14")
+    for name in subset:
+        g.node(name, label=(name[-5:] if label_short else name), comment=name)
+    for ci_name, ei_name, b, verdict, freq in shown:
+        if freq >= freq_threshold:
+            colour = EDGE_COLOURS.get(verdict, "#34495e")
+            style, pw = "solid", max(1.5, 1.5 + 3.0 * (abs(b) / b_max))
+        else:
+            colour, style, pw = EDGE_COLOURS["unstable"], "dashed", 0.8
+        g.edge(ci_name, ei_name, color=colour, style=style,
+               penwidth=f"{pw:.2f}", label=f"{b:+.2f}", fontsize="8",
+               fontcolor=colour)
+    gv_src_path = os.path.join(out_dir, file_stem + ".gv")
+    with open(gv_src_path, "w") as f:
+        f.write(g.source)
+    return gv_src_path
 
 
 def render_wasserstein_vs_freq_scatter(
@@ -352,9 +284,9 @@ def render_wasserstein_vs_freq_scatter(
     edge_threshold: float = 0.01,
     file_stem: str = "k562_w_vs_freq",
 ) -> str:
-    """Optional secondary figure: Wasserstein vs bootstrap frequency for
-    predicted edges. Strong + stable edges sit in the top right; weak or
-    unstable predictions sit in the bottom or left.
+    """Secondary figure: Wasserstein vs bootstrap frequency for predicted
+    edges. Strong + stable edges sit top-right; weak or unstable ones to the
+    bottom or left.
     """
     import matplotlib.pyplot as plt
 
@@ -362,20 +294,20 @@ def render_wasserstein_vs_freq_scatter(
     os.makedirs(out_dir, exist_ok=True)
     pred = df[df["lingam_b_ij"].abs() > edge_threshold].copy()
     if pred.empty:
-        # Nothing to plot but still produce a placeholder so the orchestrator
-        # has a stable filename to reference.
+        # Still produce a placeholder so the orchestrator has a stable filename.
         fig, ax = plt.subplots(figsize=(6, 4))
         ax.text(0.5, 0.5, "no predicted edges", ha="center", va="center")
         ax.set_axis_off()
         out = os.path.join(out_dir, file_stem + ".png")
-        fig.savefig(out, dpi=150); plt.close(fig)
+        fig.savefig(out, dpi=150)
+        plt.close(fig)
         return out
 
     fig, ax = plt.subplots(figsize=(6, 4.5))
     colour_map = {
-        CONFIRMED:      EDGE_COLOURS[CONFIRMED],
-        REFUTED:        EDGE_COLOURS[REFUTED],
-        CYCLIC:         EDGE_COLOURS[CYCLIC],
+        CONFIRMED: EDGE_COLOURS[CONFIRMED],
+        REFUTED:   EDGE_COLOURS[REFUTED],
+        CYCLIC:    EDGE_COLOURS[CYCLIC],
     }
     for verdict, group in pred.groupby("verdict"):
         c = colour_map.get(verdict, "#7f8c8d")

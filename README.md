@@ -35,6 +35,7 @@ Wasserstein effect-size measure.
 | Artefact | Produced by |
 |---|---|
 | `data_summary.md` | Correlation summary statistics over the selected gene set. |
+| `high_correlation_diagnostics.csv` | Highly-correlated gene pairs cross-referenced against bootstrap directional stability + interventional verdicts (table also in `validation_report.md`). |
 | `causalbench_plots/results.csv` | One row per ordered gene pair (effect size, bootstrap frequency, MW p-values, Wasserstein, verdict). |
 | `causalbench_plots/validation_report.md` | Structured six-verdict validation report. |
 | `causalbench_plots/SUMMARY.md` | Compact auto-generated headline numbers + caveats. |
