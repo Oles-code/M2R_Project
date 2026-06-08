@@ -1,196 +1,72 @@
-# M2R Project
-**Learning Causal Structure and Effects from Observational Data**
+# M2R Project — Learning Causal Structure and Effects from Observational Data
 
-M2R project for Imperial College London. Uses the CausalBench benchmark
-(Chevalley et al., 2025) on the Replogle 2022 Perturb-seq datasets and
-the LiNGAM library for causal discovery.
+An M2R research project (Imperial College London) applying **LiNGAM-based
+causal discovery** to single-cell **Perturb-seq** data from the **CausalBench
+K562** cell line (Replogle et al. 2022, packaged by Chevalley et al. 2025).
+
+The pipeline fits `DirectLiNGAM` to the *observational* expression of a set of
+active-everywhere genes, bootstraps the fit to assess edge stability, and then
+**validates the recovered structure against held-out interventional
+(CRISPRi-knockdown) data**: for each predicted edge i → j, knocking down gene i
+should shift the distribution of gene j. Each ordered gene pair receives one of
+six verdicts — *confirmed, refuted, cyclic, false omission, silent negative,
+indirect path* — from a Mann–Whitney U test (BH-corrected) plus a 1-D
+Wasserstein effect-size measure.
 
 ---
 
-## 1. Setup
+## Repository layout
 
-Requires Python 3.12.
+| File | Purpose |
+|---|---|
+| `causalbench_loader.py` | Download + preprocess the CausalBench K562 data into a cached `.npz`; expose `load_split`. *(Do not modify — import from it.)* |
+| `oles_data_exploration.py` | EDA on the selected gene set: gene–gene correlation matrix + residual non-Gaussianity check (the LiNGAM assumption). |
+| `lingam_model.py` | Gene selection (Schultheiss §5 active-everywhere rule), `DirectLiNGAM(measure='pwling')` fit, and the bootstrap stability assessment. |
+| `validate_edges.py` | Interventional validation: per-pair Mann–Whitney U + Wasserstein, BH correction, and the six-category verdict logic. |
+| `visualize_graph.py` | Annotated causal-graph figure (edges coloured by verdict) + the Wasserstein-vs-bootstrap-frequency scatter. |
+| `run_lingam_analysis.py` | Orchestrator: runs the full pipeline and writes `results.csv`, `validation_report.md`, `SUMMARY.md`, and the figures. |
+| `bootstrap_experiments.py` | Compares bootstrap aggregation methods + hyperparameters; writes `bootstrap_summary.md` and `bootstrap_comparison.csv`. |
+| `plot_style.py` | Shared matplotlib style + verdict colour palette used by every figure. |
+| `requirements.txt` | Pinned Python dependencies. |
+| `setup.md` | Python environment setup instructions. |
+
+### Generated outputs
+
+| Artefact | Produced by |
+|---|---|
+| `data_summary.md` | Correlation summary statistics over the selected gene set. |
+| `causalbench_plots/results.csv` | One row per ordered gene pair (effect size, bootstrap frequency, MW p-values, Wasserstein, verdict). |
+| `causalbench_plots/validation_report.md` | Structured six-verdict validation report. |
+| `causalbench_plots/SUMMARY.md` | Compact auto-generated headline numbers + caveats. |
+| `bootstrap_summary.md` / `bootstrap_comparison.csv` | Bootstrap aggregation/hyperparameter comparison. |
+| `causalbench_plots/*.png`, `*.svg`, `*.gv` | Figures (causal graph, correlation matrix, non-Gaussianity, scatter). |
+
+---
+
+## Running the pipeline
 
 ```bash
-python3.12 -m venv m2r_venv
-source m2r_venv/bin/activate
-pip install -r requirements.txt
+python run_lingam_analysis.py     # full LiNGAM fit + interventional validation
+python oles_data_exploration.py   # the two EDA figures
+python bootstrap_experiments.py   # bootstrap aggregation/hyperparameter study
 ```
 
-If `pip install -r requirements.txt` fails, install the two critical
-packages manually:
+The cached dataset lives in `causalbench_data/` (git-ignored); nothing is
+re-downloaded once it exists. All stochastic steps key off a single `SEED = 0`
+for reproducibility.
 
-```bash
-pip install setuptools
-pip install causalbench --use-deprecated=legacy-resolver
-pip install lingam
-```
+For environment setup, see **[setup.md](setup.md)**.
 
 ---
 
-## 2. Data pipeline
+## Key references
 
-The benchmark is built on two single-cell Perturb-seq datasets from
-Replogle et al. 2022:
-
-| Dataset           | Cell line | Day | Raw size  | Source       |
-| ----------------- | --------- | --- | --------- | ------------ |
-| `weissmann_k562`  | K562      | 6   | 10.66 GB  | Figshare 35773219 |
-| `weissmann_rpe1`  | RPE1      | 7   |  8.70 GB  | Figshare 35775606 |
-
-⚠️ **Why we don't just call CausalBench's loader.** The shipping version
-(`causalbench` 1.1.2) has two bugs that prevent the data from
-downloading at all:
-
-1. Its downloader calls `gdown.download(url, ...)` against Figshare URLs,
-   but `gdown` only handles Google Drive. The download silently fails
-   and leaves 0-byte `.h5ad` files on disk.
-2. The URLs it points at (`plus.figshare.com/...`) sit behind an AWS-WAF
-   challenge that blocks all non-browser traffic with an HTTP 202.
-
-We work around both in [causalbench_loader.py](causalbench_loader.py),
-which downloads from the working host (`ndownloader.figshare.com`) with a
-resumable, size-validated, auto-retrying HTTP loop, then hands the files
-to CausalBench's own preprocessing pipeline.
-
-### One-shot pipeline
-
-After setup, the whole pipeline is three calls:
-
-```python
-from causalbench_loader import download_raw_data, preprocess, load_split
-
-# 1. Download raw .h5ad files into ./causalbench_data/ (~19 GB total).
-#    Resumable: Ctrl-C and re-run continues from where it stopped.
-download_raw_data("./causalbench_data")
-
-# 2. Preprocess one cell line (normalize + log1p + filter rare perts).
-#    Cached as ./causalbench_data/dataset_<line>.npz.
-npz_path = preprocess("./causalbench_data", "weissmann_k562")
-
-# 3. Apply the training regime and unpack the arrays.
-expression_matrix, interventions, gene_names = load_split(
-    npz_path,
-    regime="observational",       # or "partial_interventional" / "full_interventional"
-    subset_data=1.0,
-)
-```
-
-Or just run the script directly:
-
-```bash
-python oles_data_exploration.py
-```
-
-### What to expect
-
-| Step                    | First run             | Subsequent runs |
-| ----------------------- | --------------------- | --------------- |
-| `download_raw_data`     | 30–60 min, ~19 GB     | instant (size check) |
-| `preprocess` (one line) | 2–5 min, ~6 GB RAM    | instant (.npz cache) |
-| `load_split`            | < 1 s                 | < 1 s |
-| `oles_data_exploration.py` end-to-end | 10–30 min | < 5 s after step 3 |
-
-`./causalbench_data/` gitignored.
-
-### Troubleshooting
-
-| Symptom | What's wrong | Fix |
-| ------- | ------------ | --- |
-| `OSError: Unable to ... open file (truncated file: eof = ...)` | An `.h5ad` is partial (e.g. you ran preprocess before download finished) | Re-run `download_raw_data` — it auto-resumes. The loader's size check now catches this before it reaches h5py. |
-| `RuntimeError: ... still short after 100 attempts` | Network too unstable for Figshare's CDN | Re-run; the file on disk is kept and the next call resumes from there. |
-| `ModuleNotFoundError: causalscbench.data_access.utils.loading` | Old code calling a function that doesn't exist in `causalscbench` 1.1.2 | Replace with the `causalbench_loader` API shown above. |
-
----
-
-## 3. Project files
-
-There are three Python entry points in the repo:
-
-### [causalbench_loader.py](causalbench_loader.py)
-Small wrapper around CausalBench's data pipeline that fixes the two
-upstream bugs above. Single source of truth for the download + preprocess
-+ split workflow — both the script and the notebook import from it, so
-any fix lands in one place. Public API: `download_raw_data`, `preprocess`,
-`load_split`.
-
-### [oles_data_exploration.py](oles_data_exploration.py)
-Non-interactive exploration script. Runs the full pipeline against one
-dataset/regime (configured at the top of the file) and writes a set of
-overview plots to `./causalbench_plots/`:
-
-- intervention distribution (cells per knockout, top 30)
-- per-gene mean-expression histogram
-- per-cell library-size histogram
-- MA-style plot of perturbed vs. control fold-change
-- 40-gene random-subset correlation heatmap
-- spotlight diff for one specific perturbed gene
-
-Run with `python oles_data_exploration.py`.
-
-> **Note on the `"excluded"` label.** CausalBench's preprocessing assigns
-> the synthetic label `"excluded"` to every cell whose perturbation target
-> appears in fewer than 100 cells (preprocessing step 4 in
-> [causalbench_loader.py](causalbench_loader.py)). On K562 this bucket is
-> typically the single biggest "intervention" by cell count and dominates
-> any plot that ranks interventions or aggregates over "perturbed" cells.
-> All plots in this script therefore exclude that bucket: section 5a/5b
-> drop it from the top-30 bar and cells-per-perturbed-gene histogram, and
-> section 6 builds `pert_mask` from real perturbations only (`~ctrl_mask
-> & ~excluded_mask`). Section 4's printout still reports `n_excluded` so
-> you can see how many cells the filter removed.
-
-#### Explanation of produced plots
-Overview plot (2x2 grid):
-top left:
- - Each bar is one CRISPR knockout experiemnt (independent variable), measured against no. of cells 6 days after transduction (dependent variable). All CRISPR knockout experiments show significantly fewer cells counted after 6 days of transduction, suggesting targeted genes play essential roles in growth, metabolism or reproduction. Baseline is non-targeting where no knockout occurs
-top right:
- - Essentially a histogram of the left plot, groups genes based off how many cells they ended up with at the end of the 6 days. Low median of 132 means we are in low-sample regime, therefore will be lots of uncertainty in recovered causal ordering; i.e. need to ensure use of bootstrapping
-bottom left:
- - Mean expression is just the average expression value of a cell for the given gene, e.g. if gene $i$ has expression values [0,2,1,0,3] across 5 cells, its mean expression value is 1.2. Expression value is a count of how many RNA molecules of that gene were detected in that cell at the time of measurement. Higher value means gene was more active in that cell at the moment of recording. The graph shows this value to be roughly right skewed, with low average but tail of highly expressive genes - good news for LiNGAM as non-Gaussianity assumption plausibly satisfied
-bottom right:
- - How many RNA molecules detected per cell, log scale also. Fairly tight and bell-shaped around roughly 900 total counts per cell (raw). Narrow spread means cells are reasonably homogeneous in sequencing depth, meaning differences between cells are more likely to reflect true biological variation than technical noise from unequal sequencing.
-
-MA plot:
- - Each dot is one gene, x-axis represents how commonly expressed the gene is, the further to the right the more commonly expressed, y-axis is the log2 fold-change - how much the average expression of that gene changes when you pool all perturbed cells together and compare to controls. Qualitatively, on average across all knockouts how does the expression of gene $y$ change. 
- - Nothing crosses the $\pm$ 0.5 dashed line, meaning the genes are not effected dramatically when you average across all peturbations indisriminantly. Labelled genes are ones with biggest change - they are all on low-expression genes, therefore highly-expressed housekeeping genes stable across all conditions
-
-Correlation heatmap:
- - Shows pairwise Pearson correlation between 40 random genes across all cells
- - Most points appear white therefore little corration between any genes in this random sample
- - This is an issue for classical methods, but not for LiNGAM as it is looking at residuals between genes, and from earlier plot we saw that the shape of distribution for genes non-Gaussian
-
-Residual non-Gaussianity plot (2x2 grid):
-This plot replaces what the bottom-left of the overview plot was trying to check. The marginal distribution of mean expression per gene is not the object LiNGAM's identifiability theorem cares about — it cares about the residual $e_i$ left over after regressing $x_i$ on its causal parents, in $x_i = \sum_{k(j)<k(i)} b_{ij} x_j + e_i$. Since we don't know the causal parents yet, we do a pairwise OLS between top high-variance genes as a proxy and look at those residuals.
-top left:
- - Scatter of one gene's expression against another's, top 10 high-variance pair, with the fitted OLS line in red. The pair is deliberately chosen as the hardest case — the ordered pair whose residuals are closest to Gaussian — so if the next three panels reject Gaussianity here, the easier pairs are fine too.
-top right:
- - Histogram of the residuals from that regression with a fitted $N(\hat\mu, \hat\sigma^2)$ overlaid. These residuals are the $e_i$ that LiNGAM actually cares about. If the histogram is visibly heavier in the tails than the dashed red Gaussian (positive excess kurtosis), the non-Gaussianity assumption is plausibly satisfied — the e's are the heavy-tailed noise that LiNGAM needs.
-bottom left:
- - Q–Q plot of the same residuals against a standard Normal. Pure Gaussian residuals would lie on the red 45° line; ends curving away from it indicate departure from normality. Tails curving up at the top-right and down at the bottom-left is the classic heavy-tail signature.
-bottom right:
- - Histogram of excess kurtosis across all 90 ordered pairs (not just the representative one). Black vertical line is the Gaussian reference (kurt = 0); red dashed line is the median across pairs. If most of the mass sits well to the right of zero, the typical pair looks like the representative one — i.e. non-Gaussianity isn't fluke-true on one example, it's true across the board, and LiNGAM's identifiability guarantee plausibly applies to this dataset.
-
-### [oles_playground.ipynb](oles_playground.ipynb)
-Notebook for interactive prototyping. Five cells:
-
-1. Download raw data (`download_raw_data`)
-2. Preprocess (`preprocess`)
-3. Apply regime + unpack arrays (`load_split`)
-4. Import `lingam`
-5. Toy `DirectLiNGAM` run on the first 100 cells × top-10 highest-variance
-   genes — a test of the model on the pipeline output
-
----
-
-## 4. References
-
-- **CausalBench**: Chevalley, Roohani, Mehrjou, Leskovec, Schwab (2025).
-  *A large-scale benchmark for network inference from single-cell
-  perturbation data.* Communications Biology 8:412.
-  https://doi.org/10.1038/s42003-025-07764-y
-- **Perturb-seq data**: Replogle et al. (2022). *Mapping
-  information-rich genotype-phenotype landscapes with genome-scale
-  Perturb-seq.* Cell 185(14).
-- **LiNGAM**: Shimizu et al. (2011). *DirectLiNGAM: A direct method for
-  learning a linear non-Gaussian structural equation model.* JMLR 12.
+- **Shimizu, S. (2012).** *DirectLiNGAM: A direct method for learning a linear
+  non-Gaussian structural equation model.* (DirectLiNGAM, `pwling` pairwise
+  measure.)
+- **Schultheiss, C. & Bühlmann, P. (2024).** *Assessing the overall and
+  partial causal well-specification of nonlinear additive noise models.*
+  (Active-everywhere cleaning + interventional well-specification checks.)
+- **Chevalley, M., Schwab, P. & Mehrjou, A. (2025).** *CausalBench: A
+  large-scale benchmark for network inference from single-cell perturbation
+  data.* (Benchmark, mean-Wasserstein / false-omission-rate metrics.)

@@ -367,6 +367,22 @@ def validate_edges(
 
     df["verdict"] = df.apply(_resolve, axis=1)
 
+    # Attach the reverse-direction p-values as their own columns. The verdict
+    # logic already consults the reverse direction (for the cyclic check); we
+    # surface it here so both the CSV and the validation report can show the
+    # forward/reverse asymmetry side by side without a second join.
+    raw_lookup = {
+        (r["cause_i"], r["effect_j"]): r["mw_pvalue_raw"] for r in rows
+    }
+    df["mw_pvalue_raw_rev"] = [
+        raw_lookup.get((e, c), float("nan"))
+        for c, e in zip(df["cause_i"], df["effect_j"])
+    ]
+    df["mw_p_bh_rev"] = [
+        bh_lookup.get((e, c), float("nan"))
+        for c, e in zip(df["cause_i"], df["effect_j"])
+    ]
+
     # Headline numbers.
     n_predicted = int(((df["lingam_b_ij"].abs() > edge_threshold)
                        & (df["verdict"] != UNDERPOWERED)

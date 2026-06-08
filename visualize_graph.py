@@ -37,15 +37,19 @@ import pandas as pd
 
 from lingam_model import LingamFit, SelectionResult
 from validate_edges import CONFIRMED, REFUTED, CYCLIC
+from plot_style import VERDICT_COLOURS, apply_style
 
 
 # ── verdict-to-colour palette ────────────────────────────────────────────────
+# Sourced from the shared style module so the graph, the scatter, and every
+# other figure agree on green=confirmed / red=refuted / orange=cyclic /
+# grey=unstable.
 
 EDGE_COLOURS = {
-    CONFIRMED:  "#27ae60",  # green
-    REFUTED:    "#c0392b",  # red
-    CYCLIC:     "#e67e22",  # orange
-    "unstable": "#95a5a6",  # grey (overrides verdict colour when freq < threshold)
+    CONFIRMED:  VERDICT_COLOURS["confirmed"],
+    REFUTED:    VERDICT_COLOURS["refuted"],
+    CYCLIC:     VERDICT_COLOURS["cyclic"],
+    "unstable": VERDICT_COLOURS["unstable"],
 }
 
 
@@ -128,12 +132,20 @@ def render_causal_graph(
         if r["cause_i"] in idx_map and r["effect_j"] in idx_map
     }
 
-    g = graphviz.Digraph("causal", format="png")
-    g.attr(rankdir="LR", overlap="false", splines="true",
-           label=f"LiNGAM (DirectLiNGAM, pwling) on K562 observational  |  "
-                 f"edges coloured by interventional verdict  |  "
-                 f"width ∝ |b_ij|, opacity ∝ bootstrap freq",
-           labelloc="t", fontsize="11")
+    # `fdp` is a force-directed engine (supports the legend cluster, unlike
+    # neato) that packs the nodes together instead of stretching them along a
+    # rank axis as `dot`+rankdir=LR did. `K` is the spring rest-length: small
+    # K + overlap=false gives a compact graph where the (enlarged) nodes are
+    # visually prominent and edges no longer dominate the figure.
+    g = graphviz.Digraph("causal", format="png", engine="fdp")
+    g.attr(overlap="false", splines="true", K="0.6", sep="+6",
+           label="Causal Graph", labelloc="t", fontsize="16",
+           fontname="Helvetica")
+    # Node defaults: large filled ellipses so nodes read as the primary
+    # objects and the edges between them stay short relative to node size.
+    g.attr("node", shape="ellipse", style="filled", fillcolor="#ecf0f1",
+           color="#7f8c8d", fontname="Helvetica", fontsize="14",
+           width="0.9", height="0.7", fixedsize="false")
 
     # Truncated labels (last 5 chars of the Ensembl ID) make a 15-node graph
     # readable. The full IDs go into the .gv source as comments so they are
@@ -144,12 +156,10 @@ def render_causal_graph(
         return name[-5:]   # last 5 chars of ENSG…
 
     for name in subset:
-        g.node(name, label=_label(name),
-               shape="ellipse", style="filled", fillcolor="#ecf0f1",
-               fontname="Helvetica", fontsize="10",
-               # full Ensembl as a tooltip / comment so the truncation
-               # doesn't lose information in the source file.
-               comment=name)
+        # Node styling comes from the graph-level node defaults set above; we
+        # only supply the (truncated) label and keep the full Ensembl ID as a
+        # comment so the truncation doesn't lose information in the .gv source.
+        g.node(name, label=_label(name), comment=name)
 
     # Pick the global |b| scale across drawn edges so widths are comparable.
     drawn = []
@@ -230,11 +240,13 @@ def render_causal_graph(
     png_path = None
     svg_path = None
     try:
+        # Both renders go through `g` so they use the fdp engine set above;
+        # rendering the SVG via a bare graphviz.Source would silently fall back
+        # to dot and produce a differently-laid-out figure.
         png_path = g.render(filename=file_stem, directory=out_dir,
                             format="png", cleanup=False)
-        svg_path = graphviz.Source(g.source).render(
-            filename=file_stem + "_svg", directory=out_dir,
-            format="svg", cleanup=True)
+        svg_path = g.render(filename=file_stem + "_svg", directory=out_dir,
+                            format="svg", cleanup=True)
     except graphviz.backend.execute.ExecutableNotFound:
         # Fall back to a matplotlib + networkx render so we still produce
         # a viewable figure when the `dot` CLI isn't installed.
@@ -323,9 +335,7 @@ def _matplotlib_fallback(
                label=f"unstable (freq < {freq_threshold:.2f})"),
     ]
     ax.legend(handles=legend_handles, loc="lower left", fontsize=8)
-    ax.set_title("LiNGAM on K562 observational — edges coloured by interventional verdict\n"
-                 "(matplotlib fallback; install graphviz for the canonical figure)",
-                 fontsize=10)
+    ax.set_title("Causal Graph")
     ax.set_axis_off()
     plt.tight_layout()
     out = os.path.join(out_dir, file_stem + "_fallback.png")
@@ -348,6 +358,7 @@ def render_wasserstein_vs_freq_scatter(
     """
     import matplotlib.pyplot as plt
 
+    apply_style()
     os.makedirs(out_dir, exist_ok=True)
     pred = df[df["lingam_b_ij"].abs() > edge_threshold].copy()
     if pred.empty:
@@ -376,9 +387,8 @@ def render_wasserstein_vs_freq_scatter(
     ax.axvline(freq_threshold, color="black", linestyle="--", linewidth=0.7,
                label=f"freq = {freq_threshold:.2f}")
     ax.set_xlabel("bootstrap selection frequency")
-    ax.set_ylabel("Wasserstein distance  ( D_int  vs  D_obs )")
-    ax.set_title("Predicted edges: shift magnitude vs stability\n"
-                 "(top-right = strong + reproducible)")
+    ax.set_ylabel("Wasserstein distance ($D_{int}$ vs $D_{obs}$)")
+    ax.set_title("Edge Stability vs Interventional Shift")
     ax.legend(loc="best", fontsize=8)
     plt.tight_layout()
     out = os.path.join(out_dir, file_stem + ".png")
