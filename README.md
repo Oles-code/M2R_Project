@@ -4,6 +4,8 @@ An M2R research project (Imperial College London) applying **LiNGAM-based
 causal discovery** to single-cell **Perturb-seq** data from the **CausalBench
 K562** cell line (Replogle et al. 2022, packaged by Chevalley et al. 2025).
 
+The full written report is the file 'Final_Gene_Sequencing_Report.pdf'
+
 The pipeline fits `DirectLiNGAM` to the *observational* expression of a set of
 active-everywhere genes, bootstraps the fit to assess edge stability, and then
 **validates the recovered structure against held-out interventional
